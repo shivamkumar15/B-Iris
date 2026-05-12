@@ -1,100 +1,110 @@
-# IRIS
+# 🎵 B-Iris
 
-IRIS is a full-screen terminal music TUI powered by [Verome API](https://github.com/Kirazul/Verome-API). It can search YouTube Music, fetch stream URLs, play audio through a local player, show lyrics, generate radio mixes, list trending music, and render a hot pink terminal visualizer while music plays.
+B-Iris is a premium, full-screen terminal music TUI (Textual User Interface) designed for the modern terminal. Powered by the Verome API and YouTube Music, it brings a sleek, high-fidelity music experience directly to your command line.
 
-## Requirements
+Featuring a vibrant **hot pink visualizer**, seamless **caching**, and **MPRIS support**, B-Iris is built for audiophiles who live in the terminal.
 
-- Python 3.10+
-- One audio player installed: `mpv`, `ffplay` from FFmpeg, or `vlc`
-- Python packages from `requirements.txt` (`textual`, `rich`, and `yt-dlp`)
+---
 
-Install the UI dependencies:
+## ✨ Features
 
+- 🔍 **Universal Search**: Find any track, album, or artist on YouTube Music.
+- 📻 **Smart Radio**: Generate instant radio mixes based on your favorite tracks.
+- 🎤 **Lyrics Support**: Fetch synced or plain lyrics with a single keypress.
+- 📊 **Trending Charts**: Stay updated with the latest music trends (US and global).
+- 🎨 **Dynamic Visualizer**: Real-time terminal spectrum analyzer.
+- ⚡ **Performance Optimized**: Background prefetching and caching for zero-lag playback.
+- 🛠️ **MPRIS Integration**: Control your music from system media widgets (Waybar, Polybar, etc.).
+
+---
+
+## 🚀 Getting Started
+
+Follow these steps to get B-Iris up and running on your system.
+
+### 1. Prerequisites
+
+Ensure you have the following installed on your system:
+- **Python 3.10+**
+- **One of these media players**:
+  - `mpv` (Recommended for best performance and visualizer accuracy)
+  - `ffplay` (Part of FFmpeg)
+  - `vlc`
+
+### 2. Installation
+
+1.  **Clone the Repository**:
+    ```bash
+    git clone https://github.com/shivamkumar15/B-Iris.git
+    cd B-Iris
+    ```
+
+2.  **Create a Virtual Environment** (Optional but recommended):
+    ```bash
+    python3 -m venv .venv
+    source .venv/bin/activate
+    ```
+
+3.  **Install Dependencies**:
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+---
+
+## 🎮 How to Use
+
+### Launching the Player
+
+To start the full-screen TUI experience:
 ```bash
-python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
+python iris.py
 ```
 
-## Usage
+### Keybindings (TUI Mode)
 
-```bash
-.venv/bin/python iris.py
-.venv/bin/python iris.py tui
-.venv/bin/python iris.py shell
-.venv/bin/python iris.py search "Blinding Lights"
-.venv/bin/python iris.py play "Blinding Lights" --first
-.venv/bin/python iris.py lyrics "Blinding Lights" --first
-.venv/bin/python iris.py radio "Blinding Lights" --first
-.venv/bin/python iris.py trending US
-.venv/bin/python iris.py recent
-.venv/bin/python iris.py favorites
-.venv/bin/python iris.py favorites --add "Blinding Lights" --first
-```
+| Key | Action |
+| :--- | :--- |
+| `/` | Focus search bar |
+| `Enter` / `p` | Play selected track |
+| `Space` | Toggle Play/Pause |
+| `n` / `b` | Next / Previous track |
+| `f` | Toggle Favorite |
+| `r` | Start Radio from selection |
+| `l` | View Lyrics |
+| `t` | Show Trending tracks |
+| `g` | View Recently played |
+| `v` | View Favorites |
+| `?` | Toggle Help |
+| `q` | Quit |
 
-## TUI Keybindings
+---
 
-The default `tui` mode shows the IRIS TUI, a full-screen Textual interface inspired by terminal music apps like `spotatui`.
-Search results and stream URLs are cached during the session, and the app prefetches audio for the first visible tracks so playback starts faster after results load.
-While music plays, the fuchsia visualizer panel shows an animated spectrum plus a progress bar. With `mpv`, IRIS reads the real player position and duration; other players fall back to an estimated timer.
+## 🛠️ Advanced Configuration
 
-```text
-/        focus search
-Enter    play selected track
-p        play selected track
-Space    pause/resume current song
-n        next song in the current list
-b        previous song in the current list
-f        add/remove selected song from favourites
-g        show recently played songs
-v        show favourite songs
-t        load US trending music
-r        load radio from selected track
-l        load lyrics for selected track
-Up/Down  move selection
-?        toggle help
-q        quit
-```
+B-Iris can be customized using environment variables:
 
-The older prompt shell is still available with `.venv/bin/python iris.py shell`.
+| Variable | Description | Example |
+| :--- | :--- | :--- |
+| `IRIS_PLAYER` | Override the default media player | `export IRIS_PLAYER="mpv --no-video"` |
+| `IRIS_YTDLP_ARGS` | Pass custom arguments to yt-dlp | `export IRIS_YTDLP_ARGS="--cookies /path/to/cookies.txt"` |
+| `IRIS_YTDLP_COOKIES_BROWSER` | Auto-extract cookies from browser | `export IRIS_YTDLP_COOKIES_BROWSER="firefox"` |
 
-Inside the shell:
+---
 
-```text
-search <song>
-play <song>
-lyrics <song>
-radio <song>
-trending [country]
-recent
-favorites
-favorite <song>
-help
-clear
-quit
-```
+## 📂 Data Storage
 
-The legacy interactive shell uses ANSI colors, bordered panels, and a dashboard-style home screen when your terminal supports it. Set `NO_COLOR=1` to disable colors.
+- **Library Data**: Favorites and history are saved to `~/.local/share/iris/library.json`.
+- **Cache**: Stream URLs and thumbnails are cached in your system's temp directory.
 
-## Configuration
+---
 
-Use a different Verome API host:
+## 🤝 Contributing
 
-```bash
-VEROME_API=http://localhost:8000 python3 iris.py search "Numb"
-```
+Contributions are welcome! Feel free to open issues or submit pull requests to improve B-Iris.
 
-Use a custom player command:
+---
 
-```bash
-IRIS_PLAYER="mpv --no-video" python3 iris.py play "Numb" --first
-```
-
-Pass extra options to `yt-dlp`, for example if YouTube asks for sign-in cookies:
-
-```bash
-IRIS_YTDLP_ARGS="--cookies /path/to/cookies.txt" python3 iris.py play "Numb" --first
-```
-
-Playback prefers `yt-dlp` direct audio URLs for reliability. If YouTube blocks anonymous extraction, IRIS automatically tries browser cookies from Chrome/Brave before falling back to Verome's `/api/stream?id=` endpoint. You can still pass a cookies file manually with `IRIS_YTDLP_ARGS`.
-
-Recently played and favourite songs are saved to `~/.local/share/iris/library.json` unless `XDG_DATA_HOME` is set. Existing `~/.local/share/climusic/library.json` data is still read if the new IRIS library has not been created yet.
+<p align="center">
+  Made with ❤️ for the Terminal community.
+</p>
