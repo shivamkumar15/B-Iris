@@ -1335,7 +1335,7 @@ def run_tui(client: VeromeClient) -> None:
             return "\n".join(
                 [
                     "[b #ff1493]IRIS[/]",
-                    "IRIS TUI player",
+                    "",
                     "",
                     f"> Search: [white]{self.last_query or '...'}[/]",
                     "",
@@ -1644,7 +1644,6 @@ def run_tui(client: VeromeClient) -> None:
                         shown.append(f"[#f9a8d4]  {text}[/]")
                     else:
                         shown.append(f"[dim]{text}[/]")
-                shown.append("[dim]Auto-scroll is estimated (no synced timestamps for this track).[/]")
                 return "\n".join(shown)
 
             elapsed = self.playback_elapsed()
