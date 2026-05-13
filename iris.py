@@ -19,6 +19,7 @@ import tempfile
 import textwrap
 import threading
 import time
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -422,22 +423,80 @@ class YTMusicClient:
         except Exception:
             return []
 
-    def get_lyrics(self, video_id: str) -> str:
+    def _parse_lrc_timed(self, lrc_text: str) -> list[tuple[float, str]]:
+        timed: list[tuple[float, str]] = []
+        for raw_line in lrc_text.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            matches = re.findall(r"\[(\d+):(\d+(?:\.\d+)?)\]", line)
+            if not matches:
+                continue
+            lyric_text = re.sub(r"\[(\d+):(\d+(?:\.\d+)?)\]", "", line).strip()
+            if not lyric_text:
+                continue
+            for minutes, seconds in matches:
+                try:
+                    timed.append((int(minutes) * 60 + float(seconds), lyric_text))
+                except ValueError:
+                    continue
+        timed.sort(key=lambda item: item[0])
+        return timed
+
+    def _extract_timed_lyrics(self, lyrics_data: dict[str, Any]) -> list[tuple[float, str]]:
+        timed_raw = (
+            lyrics_data.get("timedLyrics")
+            or lyrics_data.get("timedlyrics")
+            or lyrics_data.get("syncedLyrics")
+            or lyrics_data.get("timed_lyrics")
+        )
+        if isinstance(timed_raw, str):
+            return self._parse_lrc_timed(timed_raw)
+        if not isinstance(timed_raw, list):
+            return []
+
+        timed: list[tuple[float, str]] = []
+        for entry in timed_raw:
+            if not isinstance(entry, dict):
+                continue
+            text = str(entry.get("text") or entry.get("lyric") or entry.get("line") or "").strip()
+            if not text:
+                continue
+            stamp = entry.get("startTimeMs") or entry.get("timeMs") or entry.get("start") or entry.get("time")
+            try:
+                if isinstance(stamp, str) and ":" in stamp:
+                    parsed = self._parse_lrc_timed(f"[{stamp}]{text}")
+                    if parsed:
+                        timed.extend(parsed)
+                        continue
+                time_value = float(stamp) / (1000.0 if float(stamp) > 1000 else 1.0)
+            except (TypeError, ValueError):
+                continue
+            timed.append((time_value, text))
+        timed.sort(key=lambda item: item[0])
+        return timed
+
+    def get_lyrics_data(self, video_id: str) -> dict[str, Any]:
         try:
             watch = self.yt.get_watch_playlist(videoId=video_id)
             lyrics_id = watch.get("lyrics")
             if not lyrics_id:
-                return "No lyrics found for this track."
+                return {"text": "No lyrics found for this track.", "timed": []}
             lyrics_data = self.yt.get_lyrics(lyrics_id)
-            return lyrics_data.get("lyrics", "Lyrics not available.")
+            text = str(lyrics_data.get("lyrics") or "Lyrics not available.")
+            timed = self._extract_timed_lyrics(lyrics_data)
+            return {"text": text, "timed": timed}
         except Exception as exc:
-            return f"Error fetching lyrics: {exc}"
+            return {"text": f"Error fetching lyrics: {exc}", "timed": []}
+
+    def get_lyrics(self, video_id: str) -> str:
+        return str(self.get_lyrics_data(video_id).get("text") or "Lyrics not available.")
 
     def stream_url(self, video_id: str) -> tuple[str, dict[str, Any]]:
         # ytmusicapi doesn't provide stream URLs
         raise CliMusicError("ytmusicapi does not provide direct streaming URLs")
 
-    # Compatibility methods for existing calls
+        # Compatibility methods for existing calls
     def lyrics(self, title: str, artist: str) -> str:
         # We need a video_id for ytmusicapi lyrics, so we search first
         try:
@@ -1067,6 +1126,14 @@ def run_tui(client: VeromeClient) -> None:
             height: 1fr;
         }
 
+        #lyrics_view {
+            height: 1fr;
+            padding: 1 2;
+            text-align: center;
+            content-align: center middle;
+            display: none;
+        }
+
         #status {
             dock: bottom;
             height: 3;
@@ -1093,6 +1160,7 @@ def run_tui(client: VeromeClient) -> None:
             ("g", "recent", "Recent"),
             ("v", "favorites", "Favorites"),
             ("l", "lyrics", "Lyrics"),
+            ("m", "toggle_lyrics_mode", "Lyrics mode"),
             ("?", "toggle_help", "Help"),
             ("q", "quit", "Quit"),
         ]
@@ -1132,6 +1200,11 @@ def run_tui(client: VeromeClient) -> None:
             self._details_refresh_timer: Any = None
             self._save_timer: object | None = None
             self.mpris = None
+            self.lyrics_text = ""
+            self.lyrics_timed: list[tuple[float, str]] = []
+            self.lyrics_track_id: str | None = None
+            self.lyrics_focus_index = 0.0
+            self.lyrics_mode = "karaoke"
             if HAS_MPRIS:
                 try:
                     self.mpris = MprisProvider(self)
@@ -1150,9 +1223,10 @@ def run_tui(client: VeromeClient) -> None:
                     table = DataTable(id="table", cursor_type="row", zebra_stripes=True)
                     table.add_columns("#", "Track", "Artist", "ID")
                     yield table
+                    yield Static("", id="lyrics_view")
                     yield Static(self.visualizer_text(), id="visualizer")
                     yield Static(
-                        "/ search   enter/p play   space pause   n next   f fav   g recent   v favs   q quit",
+                        "/ search   enter/p play   l lyrics   m mode   space pause   n next   f fav   q quit",
                         id="status",
                     )
                 yield Static(self.details_text(), id="details")
@@ -1185,8 +1259,18 @@ def run_tui(client: VeromeClient) -> None:
                 )
             if tracks:
                 table.focus()
+            self.refresh_center_pane()
             self.refresh_details()
             asyncio.create_task(self.prefetch_streams(tracks[:5]))
+
+        def refresh_center_pane(self) -> None:
+            table = self.query_one("#table", DataTable)
+            lyrics_view = self.query_one("#lyrics_view", Static)
+            showing_lyrics = self.current_view == "Lyrics"
+            table.styles.display = "none" if showing_lyrics else "block"
+            lyrics_view.styles.display = "block" if showing_lyrics else "none"
+            if showing_lyrics:
+                lyrics_view.update(self.render_lyrics_view())
 
         def stop_player(self) -> None:
             if self.player_process:
@@ -1262,6 +1346,7 @@ def run_tui(client: VeromeClient) -> None:
                     item("g", "Recently played", self.current_view == "Recently Played"),
                     item("v", "Favourite songs", self.current_view == "Favourite Songs"),
                     item("l", "Lyrics", self.current_view == "Lyrics"),
+                    f"  [b]m [/] Lyrics mode: {self.lyrics_mode.title()}",
                     "",
                     "[b]Playback[/]",
                     "  [b]p [/] Play selected",
@@ -1346,6 +1431,7 @@ def run_tui(client: VeromeClient) -> None:
                         "g Recent",
                         "v Favourites",
                         "l Lyrics",
+                        "m Toggle lyrics mode",
                         "q Quit",
                     ]
                 )
@@ -1440,6 +1526,8 @@ def run_tui(client: VeromeClient) -> None:
         def tick_visualizer(self) -> None:
             self.visualizer_frame += 1
             active = bool(self.player_process and self.player_process.poll() is None)
+            if self.current_view == "Lyrics":
+                self.query_one("#lyrics_view", Static).update(self.render_lyrics_view())
             if active:
                 self.update_player_progress()
                 self.handle_player_end()
@@ -1509,6 +1597,87 @@ def run_tui(client: VeromeClient) -> None:
                     "[dim]Generated terminal visualizer[/]",
                 ]
             )
+
+        def render_lyrics_view(self) -> str:
+            if not self.lyrics_text:
+                return "[dim]No lyrics loaded. Press l on a selected track.[/]"
+            lines = [line.strip() for line in self.lyrics_text.splitlines() if line.strip()]
+            if not lines:
+                return "[dim]Lyrics not available.[/]"
+            if not self.lyrics_timed:
+                total_lines = len(lines)
+                elapsed = self.playback_elapsed()
+                duration = max(1.0, self.player_duration or self.playback_duration)
+                weighted_lengths = [max(8, len(line)) for line in lines]
+                total_weight = float(sum(weighted_lengths))
+                if total_weight <= 0:
+                    active_index = 0
+                else:
+                    target_weight = min(max(elapsed / duration, 0.0), 1.0) * total_weight
+                    running = 0.0
+                    active_index = total_lines - 1
+                    for i, weight in enumerate(weighted_lengths):
+                        running += weight
+                        if target_weight <= running:
+                            active_index = i
+                            break
+
+                if active_index >= self.lyrics_focus_index:
+                    self.lyrics_focus_index += min(0.25, active_index - self.lyrics_focus_index)
+                else:
+                    self.lyrics_focus_index -= min(0.35, self.lyrics_focus_index - active_index)
+
+                center_index = int(round(self.lyrics_focus_index))
+                karaoke_mode = self.lyrics_mode == "karaoke"
+                window = 2 if karaoke_mode else 6
+                start = max(0, center_index - window)
+                end = min(total_lines, center_index + window + 1)
+                pulse_on = (self.visualizer_frame // 3) % 2 == 0
+                mode_label = "KARAOKE MODE" if karaoke_mode else "EXTENDED MODE"
+                shown: list[str] = [f"[b #ff1493]LYRICS ({mode_label})[/]"]
+                for i in range(start, end):
+                    text = lines[i]
+                    if i == active_index:
+                        marker = ">" if pulse_on else "*"
+                        shown.append(f"[b #ffd6ea]{marker} {text}[/]")
+                    elif karaoke_mode and i == center_index:
+                        shown.append(f"[#f9a8d4]  {text}[/]")
+                    else:
+                        shown.append(f"[dim]{text}[/]")
+                shown.append("[dim]Auto-scroll is estimated (no synced timestamps for this track).[/]")
+                return "\n".join(shown)
+
+            elapsed = self.playback_elapsed()
+            active_index = 0
+            for i, (stamp, _) in enumerate(self.lyrics_timed):
+                if stamp <= elapsed:
+                    active_index = i
+                else:
+                    break
+
+            if active_index >= self.lyrics_focus_index:
+                self.lyrics_focus_index += min(0.35, active_index - self.lyrics_focus_index)
+            else:
+                self.lyrics_focus_index -= min(0.55, self.lyrics_focus_index - active_index)
+
+            center_index = int(round(self.lyrics_focus_index))
+            karaoke_mode = self.lyrics_mode == "karaoke"
+            window = 2 if karaoke_mode else 6
+            start = max(0, center_index - window)
+            end = min(len(self.lyrics_timed), center_index + window + 1)
+            pulse_on = (self.visualizer_frame // 3) % 2 == 0
+            mode_label = "KARAOKE MODE" if karaoke_mode else "EXTENDED MODE"
+            shown: list[str] = [f"[b #ff1493]{mode_label}[/]"]
+            for i in range(start, end):
+                text = self.lyrics_timed[i][1]
+                if i == active_index:
+                    marker = ">" if pulse_on else "*"
+                    shown.append(f"[b #ffd6ea]{marker} {text}[/]")
+                elif karaoke_mode and i == center_index:
+                    shown.append(f"[#f9a8d4]  {text}[/]")
+                else:
+                    shown.append(f"[dim]{text}[/]")
+            return "\n".join(shown)
 
         async def play_track_at(self, index: int) -> None:
             if index < 0 or index >= len(self.tracks):
@@ -1588,13 +1757,21 @@ def run_tui(client: VeromeClient) -> None:
             self.set_status(f"Fetching lyrics for {track.title}...")
             self.busy_label = "Fetching lyrics"
             try:
-                lyrics = await asyncio.to_thread(self.client.get_lyrics, track.video_id)
-                self.query_one("#table", DataTable).clear()
+                lyrics_data = await asyncio.to_thread(self.client.get_lyrics_data, track.video_id)
+                self.lyrics_text = str(lyrics_data.get("text") or "Lyrics not available.")
+                timed = lyrics_data.get("timed")
+                self.lyrics_timed = timed if isinstance(timed, list) else []
+                self.lyrics_track_id = track.playback_id
+                self.lyrics_focus_index = 0.0
                 self.current_view = "Lyrics"
-                self.details_override = f"[b #ff1493]LYRICS: {track.title}[/]\n\n{lyrics}"
+                self.details_override = None
                 self.refresh_sidebar()
+                self.refresh_center_pane()
                 self.refresh_details()
-                self.set_status(f"Displaying lyrics for {track.title}")
+                if self.lyrics_timed:
+                    self.set_status(f"Displaying synced lyrics for {track.title} in the center pane.")
+                else:
+                    self.set_status(f"Displaying lyrics for {track.title} in the center pane.")
             except CliMusicError as exc:
                 self.set_status(f"Error: {exc}")
             self.busy_label = ""
@@ -1689,6 +1866,13 @@ def run_tui(client: VeromeClient) -> None:
             self.help_visible = not self.help_visible
             self.refresh_details()
             self.set_status("Help shown." if self.help_visible else "Help hidden.")
+
+        def action_toggle_lyrics_mode(self) -> None:
+            self.lyrics_mode = "extended" if self.lyrics_mode == "karaoke" else "karaoke"
+            self.refresh_sidebar()
+            if self.current_view == "Lyrics":
+                self.query_one("#lyrics_view", Static).update(self.render_lyrics_view())
+            self.set_status(f"Lyrics mode: {self.lyrics_mode.title()}")
 
     CliMusicTui(client).run()
 
