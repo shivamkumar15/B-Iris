@@ -35,6 +35,7 @@ Ensure you have the following installed on your system:
     pip install -r requirements.txt
     ```
 
+
 ---
 ### Keybindings (TUI Mode)
 
@@ -54,6 +55,8 @@ Ensure you have the following installed on your system:
 | `q` | Quit |
 
 ---
+## Possible issue
+If not working then try making vitual environment then install the dependencies
 
 ## Contributing
 
