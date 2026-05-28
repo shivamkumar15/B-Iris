@@ -8,8 +8,7 @@ B-Iris is a hobby project, i just wanted my music player to be more interactive 
 ## Features
 
 - **Universal Search**: Find any track, album, or artist on YouTube Music.
-- **Smart Radio**: Generate instant radio mixes based on your favorite tracks.
-- **Lyrics Support**: Fetch synced or plain lyrics with a single keypress.
+- **Lyrics Support**: Lyrics are showing but for now sync feature is not available 
 - **Trending Charts**: Stay updated with the latest music trends .
 - **Dynamic Visualizer**: Real-time terminal spectrum analyzer.
 ---
