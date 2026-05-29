@@ -11,6 +11,7 @@ B-Iris is a hobby project, i just wanted my music player to be more interactive 
 - **Lyrics Support**: Lyrics are showing but for now sync feature is not available 
 - **Trending Charts**: Stay updated with the latest music trends .
 - **Dynamic Visualizer**: Real-time terminal spectrum analyzer.
+
 ---
 ## Screenshots
 <img width="1884" height="1009" alt="image" src="https://github.com/user-attachments/assets/a4df5013-06c9-4c71-9559-843735ece99d" />
@@ -41,6 +42,7 @@ Ensure you have the following installed on your system:
 
 
 ---
+## Few features are not working properly
 ### Keybindings (TUI Mode)
 
 | Key | Action |
