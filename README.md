@@ -12,6 +12,11 @@ B-Iris is a hobby project, i just wanted my music player to be more interactive 
 - **Trending Charts**: Stay updated with the latest music trends .
 - **Dynamic Visualizer**: Real-time terminal spectrum analyzer.
 ---
+## Screenshots
+<img width="1884" height="1009" alt="image" src="https://github.com/user-attachments/assets/a4df5013-06c9-4c71-9559-843735ece99d" />
+<img width="1880" height="1001" alt="image" src="https://github.com/user-attachments/assets/917d0c33-bc8a-4a5f-a987-32af0bad002e" />
+
+
 
 ## Getting Started
 
