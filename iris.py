@@ -954,6 +954,22 @@ def mpv_properties(process: subprocess.Popen[Any] | None, names: list[str]) -> d
     return result
 
 
+def send_mpv_command(process: subprocess.Popen[Any] | None, command: list[Any]) -> None:
+    if not process:
+        return
+    ipc_socket = PLAYER_IPC_SOCKETS.get(process.pid)
+    if not ipc_socket or not os.path.exists(ipc_socket):
+        return
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(0.2)
+            client.connect(ipc_socket)
+            payload = json.dumps({"command": command}).encode() + b"\n"
+            client.sendall(payload)
+    except OSError:
+        pass
+
+
 def stream_duration(stream_url: str, metadata: dict[str, Any]) -> float | None:
     for value in (metadata.get("duration"), metadata.get("lengthSeconds")):
         if isinstance(value, (int, float)) and value > 0:
@@ -1067,9 +1083,31 @@ def run_tui(client: VeromeClient) -> None:
     try:
         from textual.app import App, ComposeResult
         from textual.containers import Horizontal, Vertical
+        from textual.events import Click
         from textual.widgets import DataTable, Footer, Header, Input, Static
     except ImportError as exc:
         raise CliMusicError("Textual UI needs dependencies. Install them with: python3 -m pip install -r requirements.txt") from exc
+
+
+    class InteractiveVisualizer(Static):
+        def on_click(self, event: Click) -> None:
+            app = self.app
+            if not getattr(app, "player_process", None): return
+            if event.y == 3:
+                bar_width = 28
+                if 0 <= event.x < bar_width:
+                    ratio = event.x / bar_width
+                    app.seek_to_ratio(ratio)
+
+    class InteractiveDetails(Static):
+        def on_click(self, event: Click) -> None:
+            app = self.app
+            if not getattr(app, "player_process", None): return
+            if event.y == 8:
+                bar_width = 28
+                if 0 <= event.x < bar_width:
+                    ratio = event.x / bar_width
+                    app.seek_to_ratio(ratio)
 
     class CliMusicTui(App[None]):
         CSS = """
@@ -1154,6 +1192,8 @@ def run_tui(client: VeromeClient) -> None:
             ("space", "toggle_pause", "Pause/Resume"),
             ("n", "next_track", "Next"),
             ("b", "previous_track", "Previous"),
+            ("right", "seek_forward", "Forward"),
+            ("left", "seek_backward", "Backward"),
             ("f", "toggle_favorite", "Favorite"),
             ("t", "trending", "Trending"),
             ("r", "radio", "Radio"),
@@ -1224,12 +1264,12 @@ def run_tui(client: VeromeClient) -> None:
                     table.add_columns("#", "Track", "Artist", "ID")
                     yield table
                     yield Static("", id="lyrics_view")
-                    yield Static(self.visualizer_text(), id="visualizer")
+                    yield InteractiveVisualizer(self.visualizer_text(), id="visualizer")
                     yield Static(
-                        "/ search   enter/p play   l lyrics   m mode   space pause   n next   f fav   q quit",
+                        "/ search   enter/p play   l lyrics   m mode   space pause   n next   f fav   q quit   left/right seek",
                         id="status",
                     )
-                yield Static(self.details_text(), id="details")
+                yield InteractiveDetails(self.details_text(), id="details")
             yield Footer()
 
         def on_mount(self) -> None:
@@ -1536,6 +1576,31 @@ def run_tui(client: VeromeClient) -> None:
                 # Idle: pulse dots change every 4 frames, skip redundant refreshes
                 self.handle_player_end()
                 self.query_one("#visualizer", Static).update(self.visualizer_text())
+
+
+        def seek_to_ratio(self, ratio: float) -> None:
+            if not self.player_process: return
+            duration = max(1.0, self.player_duration or self.playback_duration)
+            target_time = max(0.0, min(duration, duration * ratio))
+            send_mpv_command(self.player_process, ["set_property", "time-pos", target_time])
+            self.player_position = target_time
+            self.update_player_progress()
+            self.query_one("#visualizer", InteractiveVisualizer).update(self.visualizer_text())
+            self.refresh_details()
+
+        def action_seek_forward(self) -> None:
+            if not self.player_process: return
+            duration = max(1.0, self.player_duration or self.playback_duration)
+            current = self.playback_elapsed()
+            target = min(duration, current + 10.0)
+            self.seek_to_ratio(target / duration)
+
+        def action_seek_backward(self) -> None:
+            if not self.player_process: return
+            duration = max(1.0, self.player_duration or self.playback_duration)
+            current = self.playback_elapsed()
+            target = max(0.0, current - 10.0)
+            self.seek_to_ratio(target / duration)
 
         def update_player_progress(self) -> None:
             if not self.player_process or self.player_process.poll() is not None:
