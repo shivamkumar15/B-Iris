@@ -1572,6 +1572,7 @@ def run_tui(client: VeromeClient) -> None:
                 self.update_player_progress()
                 self.handle_player_end()
                 self.query_one("#visualizer", Static).update(self.visualizer_text())
+                self.refresh_details()
             elif self.visualizer_frame % 4 == 0:
                 # Idle: pulse dots change every 4 frames, skip redundant refreshes
                 self.handle_player_end()
