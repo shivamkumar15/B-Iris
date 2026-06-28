@@ -1109,6 +1109,17 @@ def run_tui(client: VeromeClient) -> None:
                     ratio = event.x / bar_width
                     app.seek_to_ratio(ratio)
 
+    class InteractiveProgress(Static):
+        def on_click(self, event: Click) -> None:
+            app = self.app
+            if not getattr(app, "player_process", None):
+                return
+            if event.x < 0 or event.x >= self.size.width:
+                return
+            ratio = event.x / self.size.width
+            ratio = max(0.0, min(1.0, ratio))
+            app.seek_to_ratio(ratio)
+
     class CliMusicTui(App[None]):
         CSS = """
         Screen {
@@ -1144,10 +1155,17 @@ def run_tui(client: VeromeClient) -> None:
             padding: 0 1;
             background: #160516;
             border-top: heavy #ff1493;
-            color: #ff1493;
-        }
+color: #ff1493;
+         }
 
-        #details {
+         #progress_bar {
+             width: 28;
+             height: 1;
+             margin: 1 0;
+             color: #ff1493;
+         }
+
+         #details {
             width: 30;
             min-width: 26;
             background: #1a0a18;
@@ -1265,12 +1283,24 @@ def run_tui(client: VeromeClient) -> None:
                     yield table
                     yield Static("", id="lyrics_view")
                     yield InteractiveVisualizer(self.visualizer_text(), id="visualizer")
+                    yield InteractiveProgress(self.progress_text(), id="progress_bar")
                     yield Static(
                         "/ search   enter/p play   l lyrics   m mode   space pause   n next   f fav   q quit   left/right seek",
                         id="status",
                     )
                 yield InteractiveDetails(self.details_text(), id="details")
             yield Footer()
+
+        class InteractiveProgress(Static):
+            def on_click(self, event: Click) -> None:
+                app = self.app
+                if not getattr(app, "player_process", None):
+                    return
+                if event.x < 0 or event.x >= self.size.width:
+                    return
+                ratio = event.x / self.size.width
+                ratio = max(0.0, min(1.0, ratio))
+                app.seek_to_ratio(ratio)
 
         def on_mount(self) -> None:
             self.title = APP_NAME
@@ -1493,7 +1523,7 @@ def run_tui(client: VeromeClient) -> None:
                     "",
                     "[b]Player Status[/]",
                     f"State: {'Paused' if self.is_paused else 'Playing' if self.player_process else 'Idle'}",
-                    self.progress_text() if self.player_process else "",
+                    self.progress_text(),
                     "",
                     "[b]Selection[/]",
                     f"Track {(self.index_for_track(display_track) or 0) + 1 if self.tracks else '?'} of {len(self.tracks)}",
@@ -1551,6 +1581,8 @@ def run_tui(client: VeromeClient) -> None:
             return f"{minutes}:{remaining:02d}"
 
         def progress_text(self) -> str:
+            if not self.player_process:
+                return "[dim]No progress[/]"
             elapsed = self.playback_elapsed()
             duration = max(1.0, self.player_duration or self.playback_duration)
             ratio = min(elapsed / duration, 1.0)
@@ -1577,6 +1609,8 @@ def run_tui(client: VeromeClient) -> None:
                 # Idle: pulse dots change every 4 frames, skip redundant refreshes
                 self.handle_player_end()
                 self.query_one("#visualizer", Static).update(self.visualizer_text())
+            # Update progress bar
+            self.query_one("#progress_bar", InteractiveProgress).update(self.progress_text())
 
 
         def seek_to_ratio(self, ratio: float) -> None:
