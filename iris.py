@@ -602,6 +602,7 @@ def render_home() -> None:
         [
             "search <song>       Find tracks on YouTube Music",
             "play <song>         Search, select, and play audio",
+            "download <song>     Search, select, and download audio",
             "lyrics <song>       Fetch synced or plain lyrics",
             "radio <song>        Build a related-track radio mix",
             "trending [country]  Show trending music, default US",
@@ -849,6 +850,54 @@ def play_track(client: VeromeClient, track: Track) -> None:
         raise CliMusicError(f"Player executable not found: {player[0]}") from exc
 
 
+def download_track(client: VeromeClient, track: Track, output_dir: str = ".") -> str:
+    yt_dlp = find_yt_dlp()
+    if not yt_dlp:
+        raise CliMusicError("yt-dlp is not installed")
+
+    url = f"https://www.youtube.com/watch?v={track.playback_id}"
+    extra_args = shlex.split(os.environ.get(YTDLP_ARGS_ENV, ""))
+    cookies_browser = os.environ.get(YTDLP_COOKIES_BROWSER_ENV)
+    if cookies_browser and "--cookies-from-browser" not in extra_args and "--cookies" not in extra_args:
+        extra_args.extend(["--cookies-from-browser", cookies_browser])
+
+    clean_artists = re.sub(r'[\\/*?:"<>|]', "", track.artists)
+    clean_title = re.sub(r'[\\/*?:"<>|]', "", track.title)
+    filename_template = os.path.join(output_dir, f"{clean_artists} - {clean_title}.%(ext)s")
+    has_ffmpeg = shutil.which("ffmpeg") is not None
+
+    cmd = [*yt_dlp, *extra_args]
+    if has_ffmpeg:
+        cmd.extend(["-x", "--audio-format", "mp3"])
+    else:
+        cmd.extend(["-f", "bestaudio"])
+    cmd.extend(["-o", filename_template, "--no-playlist", url])
+
+    try:
+        result = subprocess.run(
+            cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise CliMusicError("Download timed out") from exc
+    except OSError as exc:
+        raise CliMusicError(f"Could not run yt-dlp: {exc}") from exc
+
+    if result.returncode != 0:
+        error_msg = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "Unknown yt-dlp error"
+        raise CliMusicError(f"yt-dlp failed: {error_msg}")
+
+    expected_prefix = f"{clean_artists} - {clean_title}."
+    for file in os.listdir(output_dir):
+        if file.startswith(expected_prefix):
+            return os.path.join(output_dir, file)
+
+    return os.path.join(output_dir, f"{clean_artists} - {clean_title}.*")
+
+
 def add_recent_track(track: Track) -> None:
     library = load_library()
     recent = [item for item in library["recent"] if track_key(item) != track_key(track)]
@@ -1027,6 +1076,20 @@ def command_play(client: VeromeClient, args: argparse.Namespace) -> None:
         play_track(client, track)
 
 
+def command_download(client: VeromeClient, args: argparse.Namespace) -> None:
+    if args.video_id:
+        track = Track(args.video_id, "Direct video ID", args.video_id)
+    else:
+        if not args.query:
+            raise CliMusicError("Provide a search query or --video-id")
+        tracks = search_tracks(client, args.query, "songs")
+        track = tracks[0] if args.first and tracks else choose_track(tracks)
+    if track:
+        print(color(f"Downloading '{track.title}'...", GREEN))
+        dest = download_track(client, track)
+        print(color(f"Successfully downloaded to: {dest}", GREEN))
+
+
 def command_lyrics(client: VeromeClient, args: argparse.Namespace) -> None:
     title = args.title
     artist = args.artist
@@ -1085,6 +1148,7 @@ def run_tui(client: VeromeClient) -> None:
         from textual.containers import Horizontal, Vertical
         from textual.events import Click
         from textual.widgets import DataTable, Footer, Header, Input, Static
+        from textual.theme import Theme
     except ImportError as exc:
         raise CliMusicError("Textual UI needs dependencies. Install them with: python3 -m pip install -r requirements.txt") from exc
 
@@ -1123,13 +1187,13 @@ def run_tui(client: VeromeClient) -> None:
     class CliMusicTui(App[None]):
         CSS = """
         Screen {
-            background: #120712;
-            color: #fce7f3;
+            background: $background;
+            color: $text;
         }
 
         Header, Footer {
-            background: #2a0a22;
-            color: #ff1493;
+            background: $boost;
+            color: $primary;
         }
 
         #body {
@@ -1139,47 +1203,84 @@ def run_tui(client: VeromeClient) -> None:
         #sidebar {
             width: 24;
             min-width: 22;
-            background: #1a0a18;
-            border: round #ff1493;
+            background: $surface;
+            border: round $primary;
             padding: 1;
         }
 
         #main {
             width: 1fr;
-            border: round #5b143f;
+            border: round $secondary;
         }
 
         #visualizer {
             height: 8;
             min-height: 8;
             padding: 0 1;
-            background: #160516;
-            border-top: heavy #ff1493;
-color: #ff1493;
+            background: $panel;
+            border-top: heavy $primary;
+            color: $primary;
          }
 
          #progress_bar {
              width: 28;
              height: 1;
              margin: 1 0;
-             color: #ff1493;
+             color: $primary;
          }
 
          #details {
             width: 30;
             min-width: 26;
-            background: #1a0a18;
-            border: round #ff1493;
+            background: $surface;
+            border: round $primary;
             padding: 1;
         }
 
         #search {
             dock: top;
             margin: 0 1 1 1;
+            background: $surface;
+            color: $text;
+            border: tall $secondary;
+        }
+
+        #search:focus {
+            border: tall $primary;
         }
 
         #table {
             height: 1fr;
+            background: $background;
+            color: $text;
+        }
+
+        DataTable {
+            background: $background;
+            color: $text;
+        }
+
+        DataTable > .datatable--header {
+            background: $boost;
+            color: $primary;
+        }
+
+        DataTable > .datatable--cursor {
+            background: $primary;
+            color: $text;
+            text-style: bold;
+        }
+
+        DataTable > .datatable--even-row {
+            background: $surface;
+        }
+
+        DataTable > .datatable--odd-row {
+            background: $background;
+        }
+
+        ScrollBar {
+            color: $primary;
         }
 
         #lyrics_view {
@@ -1194,19 +1295,61 @@ color: #ff1493;
             dock: bottom;
             height: 3;
             padding: 0 1;
-            background: #21081d;
-            color: #f9a8d4;
+            background: $panel;
+            color: $text;
         }
 
         .title {
-            color: #ff1493;
+            color: $primary;
             text-style: bold;
+        }
+
+        CommandPalette {
+            background: $background 60%;
+        }
+
+        CommandPalette > Vertical {
+            background: $surface;
+            border: round $primary;
+        }
+
+        CommandPalette #--input {
+            background: $surface;
+            color: $text;
+            border-bottom: tall $secondary;
+        }
+
+        CommandPalette #--input:focus {
+            border-bottom: tall $primary;
+        }
+
+        CommandPalette OptionList {
+            background: $surface;
+            color: $text;
+            border: none;
+        }
+
+        CommandPalette OptionList > .option-list--option-highlighted {
+            background: $primary;
+            color: $text;
+            text-style: bold;
+        }
+
+        CommandPalette OptionList > .option-list--option-hover {
+            background: $secondary;
+            color: $text;
+        }
+
+        CommandPalette LoadingIndicator {
+            background: $surface;
+            color: $primary;
         }
         """
 
         BINDINGS = [
             ("/", "focus_search", "Search"),
             ("enter,p", "play_selected", "Play"),
+            ("d", "download_selected", "Download"),
             ("space", "toggle_pause", "Pause/Resume"),
             ("n", "next_track", "Next"),
             ("b", "previous_track", "Previous"),
@@ -1285,7 +1428,7 @@ color: #ff1493;
                     yield InteractiveVisualizer(self.visualizer_text(), id="visualizer")
                     yield InteractiveProgress(self.progress_text(), id="progress_bar")
                     yield Static(
-                        "/ search   enter/p play   l lyrics   m mode   space pause   n next   f fav   q quit   left/right seek",
+                        "/ search   enter/p play   d download   l lyrics   m mode   space pause   n next   f fav   q quit   left/right seek",
                         id="status",
                     )
                 yield InteractiveDetails(self.details_text(), id="details")
@@ -1303,6 +1446,20 @@ color: #ff1493;
                 app.seek_to_ratio(ratio)
 
         def on_mount(self) -> None:
+            iris_theme = Theme(
+                name="iris",
+                primary="#ff1493",
+                secondary="#5b143f",
+                accent="#ff1493",
+                background="#120712",
+                surface="#1a0a18",
+                panel="#21081d",
+                boost="#2a0a22",
+                foreground="#fce7f3",
+                dark=True
+            )
+            self.register_theme(iris_theme)
+            self.theme = "iris"
             self.title = APP_NAME
             self.sub_title = f" {APP_SUBTITLE}"
             self.query_one("#search", Input).focus()
@@ -1420,6 +1577,7 @@ color: #ff1493;
                     "",
                     "[b]Playback[/]",
                     "  [b]p [/] Play selected",
+                    "  [b]d [/] Download selected",
                     "  [b]space [/] Pause/resume",
                     "  [b]n [/] Next track",
                     "  [b]b [/] Previous track",
@@ -1493,6 +1651,7 @@ color: #ff1493;
                         "[b #ff1493]Help[/]",
                         "/ Search focus",
                         "Enter or p Play selected",
+                        "d Download selected",
                         "Space Pause/resume",
                         "n/b Next/previous",
                         "f Toggle favourite",
@@ -1523,7 +1682,6 @@ color: #ff1493;
                     "",
                     "[b]Player Status[/]",
                     f"State: {'Paused' if self.is_paused else 'Playing' if self.player_process else 'Idle'}",
-                    self.progress_text(),
                     "",
                     "[b]Selection[/]",
                     f"Track {(self.index_for_track(display_track) or 0) + 1 if self.tracks else '?'} of {len(self.tracks)}",
@@ -1693,7 +1851,6 @@ color: #ff1493;
                     f"[b #ff1493]NOW PLAYING[/] [white]{title}[/]",
                     row,
                     "".join(reversed(columns)),
-                    self.progress_text(),
                     "[dim]Generated terminal visualizer[/]",
                 ]
             )
@@ -1883,6 +2040,20 @@ color: #ff1493;
             index = self.index_for_track(track)
             await self.play_track_at(index if index is not None else 0)
 
+        async def action_download_selected(self) -> None:
+            track = self.selected_track() or self.now_playing
+            if not track:
+                self.set_status("Select or play a track to download.")
+                return
+            self.set_status(f"Downloading '{track.title}'...")
+            self.busy_label = "Downloading"
+            try:
+                dest = await asyncio.to_thread(download_track, self.client, track)
+                self.set_status(f"Downloaded '{track.title}' to {dest}")
+            except Exception as exc:
+                self.set_status(f"Download failed: {exc}")
+            self.busy_label = ""
+
         def action_focus_search(self) -> None:
             self.query_one("#search", Input).focus()
             self.set_status("Type a search and press Enter.")
@@ -2005,6 +2176,12 @@ def interactive(client: VeromeClient) -> None:
                 if track:
                     add_recent_track(track)
                     play_track(client, track)
+            elif command in {"download", "d"} and value:
+                track = choose_track(search_tracks(client, value, "songs"))
+                if track:
+                    print(color(f"Downloading '{track.title}'...", GREEN))
+                    dest = download_track(client, track)
+                    print(color(f"Successfully downloaded to: {dest}", GREEN))
             elif command in {"favorite", "favourite", "fav", "f"} and value:
                 track = choose_track(search_tracks(client, value, "songs"))
                 if track:
@@ -2041,6 +2218,7 @@ def build_parser() -> argparse.ArgumentParser:
             Examples:
               python3 iris.py search "Blinding Lights"
               python3 iris.py play "Blinding Lights" --first
+              python3 iris.py download "Blinding Lights" --first
               python3 iris.py lyrics "Blinding Lights" --first
               python3 iris.py radio "Blinding Lights" --first
 
@@ -2063,6 +2241,12 @@ def build_parser() -> argparse.ArgumentParser:
     play.add_argument("--video-id", help="Play a known YouTube video ID directly")
     play.add_argument("--first", action="store_true", help="Play the first result without prompting")
     play.set_defaults(func=command_play)
+
+    download = subparsers.add_parser("download", help="Search and download a track")
+    download.add_argument("query", nargs="?", help="Search query")
+    download.add_argument("--video-id", help="Download a known YouTube video ID directly")
+    download.add_argument("--first", action="store_true", help="Download the first result without prompting")
+    download.set_defaults(func=command_download)
 
     lyrics = subparsers.add_parser("lyrics", help="Find synced/plain lyrics")
     lyrics.add_argument("query", nargs="?", help="Search query")
