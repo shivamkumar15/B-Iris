@@ -576,17 +576,19 @@ def panel(title: str, lines: list[str], width: int | None = None) -> None:
     print(color(bottom, MAGENTA))
 
 
+B_IRIS_LOGO_LINES = [
+    "██████╗░░░░░░░██╗██████╗░██╗░██████╗",
+    "██╔══██╗░░░░░░██║██╔══██╗██║██╔════╝",
+    "██████╦╝█████╗██║██████╔╝██║╚█████╗░",
+    "██╔══██╗╚════╝██║██╔══██╗██║░╚═══██╗",
+    "██████╦╝░░░░░░██║██║░░██║██║██████╔╝",
+    "╚═════╝░░░░░░░╚═╝╚═╝░░╚═╝╚═╝╚═════╝░",
+]
+
 def hero() -> None:
     width = term_width()
-    logo = [
-        "    ____   ____   ____  _____",
-        "   /  _/  / __ \\ /  _/ / ___/",
-        "   / /   / /_/ / / /   \\__ \\",
-        " _/ /   / _, _/_/ /   ___/ /",
-        "/___/  /_/ |_|/___/  /____/ ",
-    ]
     print()
-    for index, line in enumerate(logo):
+    for index, line in enumerate(B_IRIS_LOGO_LINES):
         shade = CYAN if index % 2 == 0 else BLUE
         print(color(line.center(width), shade))
     print(color("IRIS TUI player".center(width), DIM))
@@ -1229,12 +1231,26 @@ def run_tui(client: VeromeClient) -> None:
              color: $primary;
          }
 
+         #right_sidebar {
+            width: 38;
+            min-width: 38;
+            height: 1fr;
+         }
+
          #details {
-            width: 30;
-            min-width: 26;
+            height: 1fr;
             background: $surface;
             border: round $primary;
             padding: 1;
+        }
+
+        #logo_box {
+            height: 8;
+            background: $surface;
+            color: $secondary;
+            text-align: center;
+            border: round $primary;
+            padding: 0 1;
         }
 
         #search {
@@ -1431,7 +1447,10 @@ def run_tui(client: VeromeClient) -> None:
                         "/ search   enter/p play   d download   l lyrics   m mode   space pause   n next   f fav   q quit   left/right seek",
                         id="status",
                     )
-                yield InteractiveDetails(self.details_text(), id="details")
+                with Vertical(id="right_sidebar"):
+                    yield InteractiveDetails(self.details_text(), id="details")
+                    logo_str = "\n".join(B_IRIS_LOGO_LINES)
+                    yield Static(f"[#00ffff]{logo_str}[/]", id="logo_box")
             yield Footer()
 
         class InteractiveProgress(Static):
