@@ -9,6 +9,7 @@ B-Iris is a hobby project, i just wanted my music player to be more interactive 
 
 - **Universal Search**: Find any track, album, or artist on YouTube Music.
 - **Lyrics Support**: Lyrics are showing but for now sync feature is not available 
+- **Download Support**: Search, select, and download audio locally via `yt-dlp`.
 - **Trending Charts**: Stay updated with the latest music trends .
 - **Dynamic Visualizer**: Real-time terminal spectrum analyzer.
 
@@ -51,6 +52,7 @@ Ensure you have the following installed on your system:
 | :--- | :--- |
 | `/` | Focus search bar |
 | `Enter` / `p` | Play selected track |
+| `d` | Download selected track |
 | `Space` | Toggle Play/Pause |
 | `n` / `b` | Next / Previous track |
 | `f` | Toggle Favorite |
