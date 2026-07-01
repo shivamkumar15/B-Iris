@@ -1232,8 +1232,8 @@ def run_tui(client: VeromeClient) -> None:
          }
 
          #right_sidebar {
-            width: 38;
-            min-width: 38;
+            width: 42;
+            min-width: 42;
             height: 1fr;
          }
 
@@ -1251,6 +1251,7 @@ def run_tui(client: VeromeClient) -> None:
             text-align: center;
             border: round $primary;
             padding: 0 1;
+            text-wrap: nowrap;
         }
 
         #search {
