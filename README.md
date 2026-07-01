@@ -16,7 +16,8 @@ B-Iris is a hobby project, i just wanted my music player to be more interactive 
 ---
 ## Screenshots
 #Main Screen
-<img width="1884" height="1009" alt="image" src="https://github.com/user-attachments/assets/a4df5013-06c9-4c71-9559-843735ece99d" />
+<img width="1892" height="1006" alt="2026-07-01-212448" src="https://github.com/user-attachments/assets/e2446a43-4a9d-49c2-986c-d6bd83396de8" />
+
 # Lyrics
 <img width="1880" height="1001" alt="image" src="https://github.com/user-attachments/assets/917d0c33-bc8a-4a5f-a987-32af0bad002e" />
 
