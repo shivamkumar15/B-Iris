@@ -1437,7 +1437,7 @@ def run_tui(client: VeromeClient) -> None:
             with Horizontal(id="body"):
                 yield Static(self.nav_text(), id="sidebar")
                 with Vertical(id="main"):
-                    yield Input(placeholder="Search YouTube Music with Verome...", id="search")
+                    yield Input(placeholder="Search your song...", id="search")
                     table = DataTable(id="table", cursor_type="row", zebra_stripes=True)
                     table.add_columns("#", "Track", "Artist", "ID")
                     yield table
