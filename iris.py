@@ -47,6 +47,7 @@ PLAYER_LOG = os.path.join(tempfile.gettempdir(), "climusic-player.log")
 PLAYER_IPC_SOCKETS: dict[int, str] = {}
 DATA_HOME = os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share"))
 LIBRARY_FILE = os.path.join(DATA_HOME, "iris", "library.json")
+CONFIG_FILE = os.path.join(DATA_HOME, "iris", "config.json")
 CACHE_DIR = os.path.join(tempfile.gettempdir(), "climusic-cache")
 OLD_LIBRARY_FILE = os.path.join(DATA_HOME, "climusic", "library.json")
 # Pre-computed visualizer bar segments: _VIS_BARS[color_idx][level] = "[#color]char[/]"
@@ -286,6 +287,22 @@ def track_from_dict(item: Any) -> Track | None:
         thumbnail=item.get("thumbnail"),
         duration=item.get("duration")
     )
+
+
+def load_config() -> dict[str, Any]:
+    try:
+        with open(CONFIG_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+def save_config(config: dict[str, Any]) -> None:
+    os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
+    try:
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2)
+    except OSError:
+        pass
 
 
 def load_library() -> dict[str, list[Track]]:
@@ -1465,6 +1482,12 @@ def run_tui(client: VeromeClient) -> None:
                 ratio = max(0.0, min(1.0, ratio))
                 app.seek_to_ratio(ratio)
 
+        def watch_theme(self, new_theme: str) -> None:
+            config = load_config()
+            if config.get("theme") != new_theme:
+                config["theme"] = new_theme
+                save_config(config)
+
         def on_mount(self) -> None:
             iris_theme = Theme(
                 name="iris",
@@ -1479,7 +1502,10 @@ def run_tui(client: VeromeClient) -> None:
                 dark=True
             )
             self.register_theme(iris_theme)
-            self.theme = "iris"
+            
+            config = load_config()
+            self.theme = config.get("theme", "iris")
+            
             self.title = APP_NAME
             self.sub_title = f" {APP_SUBTITLE}"
             self.query_one("#search", Input).focus()
