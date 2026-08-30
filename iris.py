@@ -43,6 +43,7 @@ PLAYER_ENV = "IRIS_PLAYER"
 LEGACY_PLAYER_ENV = "CLIMUSIC_PLAYER"
 YTDLP_ARGS_ENV = "IRIS_YTDLP_ARGS"
 YTDLP_COOKIES_BROWSER_ENV = "IRIS_YTDLP_COOKIES_BROWSER"
+SSL_INSECURE_ENV = "IRIS_SSL_INSECURE"
 PLAYER_LOG = os.path.join(tempfile.gettempdir(), "climusic-player.log")
 PLAYER_IPC_SOCKETS: dict[int, str] = {}
 DATA_HOME = os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share"))
@@ -61,6 +62,35 @@ _VIS_NUM_BARS = len(_VIS_BAR_CHARS) - 1  # 7
 _VIS_NUM_COLORS = len(_VIS_COLORS)       # 6
 
 RESET = "\033[0m"
+
+
+def ssl_insecure_enabled() -> bool:
+    return os.environ.get(SSL_INSECURE_ENV) == "1"
+
+
+def apply_ssl_insecure() -> None:
+    if not ssl_insecure_enabled():
+        return
+    try:
+        import requests
+        from urllib3.exceptions import InsecureRequestWarning
+
+        if not getattr(requests.Session.request, "_iris_insecure", False):
+            original = requests.Session.request
+
+            def patched(self, method, url=None, **kwargs):
+                kwargs.setdefault("verify", False)
+                return original(self, method, url, **kwargs)
+
+            patched._iris_insecure = True
+            requests.Session.request = patched
+        urllib3_disable = getattr(__import__("urllib3"), "disable_warnings")
+        urllib3_disable(InsecureRequestWarning)
+    except Exception:
+        pass
+
+
+apply_ssl_insecure()
 DIM = "\033[2m"
 BOLD = "\033[1m"
 CYAN = "\033[36m"
@@ -361,6 +391,18 @@ class YTMusicClient:
                 results = self.yt.search(query)
                 return [track for item in results if (track := self._parse_track(item))]
             except Exception:
+                err = str(exc)
+                if "CERTIFICATE_VERIFY_FAILED" in err or "SSLError" in err:
+                    raise CliMusicError(
+                        f"Search failed: {exc} | Network is intercepting SSL (e.g. FortiGate firewall). "
+                        f"Install its root CA cert system-wide, or rerun with {SSL_INSECURE_ENV}=1 to bypass."
+                    )
+                if "Expecting value" in err or isinstance(exc, ValueError):
+                    raise CliMusicError(
+                        "Search failed: YouTube Music returned an unexpected page instead of data. "
+                        "Your network is likely blocking YouTube Music (firewall/captive portal). "
+                        "Try a different network, e.g. a mobile hotspot."
+                    )
                 raise CliMusicError(f"Search failed: {exc}")
 
     def _parse_track(self, item: dict[str, Any]) -> Track | None:
@@ -732,6 +774,8 @@ def yt_dlp_stream_url(video_id: str) -> str:
                 ["--cookies-from-browser", "brave"],
             ]
         )
+    if ssl_insecure_enabled():
+        attempts = [[*a, "--no-check-certificate"] for a in attempts]
 
     last_error = "yt-dlp could not resolve audio"
     for attempt_args in attempts:
@@ -767,6 +811,8 @@ def yt_dlp_search(query: str, limit: int = 20) -> list[Track]:
     cookies_browser = os.environ.get(YTDLP_COOKIES_BROWSER_ENV)
     if cookies_browser and "--cookies-from-browser" not in extra_args and "--cookies" not in extra_args:
         extra_args.extend(["--cookies-from-browser", cookies_browser])
+    if ssl_insecure_enabled():
+        extra_args.append("--no-check-certificate")
 
     try:
         result = subprocess.run(
@@ -1396,6 +1442,7 @@ def run_tui(client: VeromeClient) -> None:
             ("v", "favorites", "Favorites"),
             ("l", "lyrics", "Lyrics"),
             ("m", "toggle_lyrics_mode", "Lyrics mode"),
+            ("c", "toggle_continuous", "Continuous"),
             ("?", "toggle_help", "Help"),
             ("q", "quit", "Quit"),
         ]
@@ -1440,6 +1487,7 @@ def run_tui(client: VeromeClient) -> None:
             self.lyrics_track_id: str | None = None
             self.lyrics_focus_index = 0.0
             self.lyrics_mode = "karaoke"
+            self.continuous_play = False
             if HAS_MPRIS:
                 try:
                     self.mpris = MprisProvider(self)
@@ -1462,7 +1510,7 @@ def run_tui(client: VeromeClient) -> None:
                     yield InteractiveVisualizer(self.visualizer_text(), id="visualizer")
                     yield InteractiveProgress(self.progress_text(), id="progress_bar")
                     yield Static(
-                        "/ search   enter/p play   d download   l lyrics   m mode   space pause   n next   f fav   q quit   left/right seek",
+                        "/ search   enter/p play   d download   l lyrics   m mode   c continuous   space pause   n next   f fav   q quit   left/right seek",
                         id="status",
                     )
                 with Vertical(id="right_sidebar"):
@@ -1568,8 +1616,16 @@ def run_tui(client: VeromeClient) -> None:
 
         def handle_player_end(self) -> None:
             if self.player_process and self.player_process.poll() is not None:
+                returncode = self.player_process.poll()
                 self.stop_player()
-                if self.now_playing_index is not None and self.now_playing_index + 1 < len(self.tracks):
+                if returncode != 0:
+                    # Player exited with an error (e.g. stream failed to play):
+                    # don't auto-advance, otherwise it would rapidly skip through
+                    # every track in the list.
+                    self.set_status("Playback stopped (player exited unexpectedly).")
+                elif not self.continuous_play:
+                    self.set_status("Playback finished.")
+                elif self.now_playing_index is not None and self.now_playing_index + 1 < len(self.tracks):
                     asyncio.create_task(self.play_track_at(self.now_playing_index + 1))
                 else:
                     self.set_status("Playback finished.")
@@ -1620,6 +1676,7 @@ def run_tui(client: VeromeClient) -> None:
                     item("v", "Favourite songs", self.current_view == "Favourite Songs"),
                     item("l", "Lyrics", self.current_view == "Lyrics"),
                     f"  [b]m [/] Lyrics mode: {self.lyrics_mode.title()}",
+                    f"  [b]c [/] Continuous: {'On' if self.continuous_play else 'Off'}",
                     "",
                     "[b]Playback[/]",
                     "  [b]p [/] Play selected",
@@ -2189,6 +2246,15 @@ def run_tui(client: VeromeClient) -> None:
             if self.current_view == "Lyrics":
                 self.query_one("#lyrics_view", Static).update(self.render_lyrics_view())
             self.set_status(f"Lyrics mode: {self.lyrics_mode.title()}")
+
+        def action_toggle_continuous(self) -> None:
+            self.continuous_play = not self.continuous_play
+            self.refresh_sidebar()
+            self.set_status(
+                "Continuous play ON (auto-advance to next track)."
+                if self.continuous_play
+                else "Continuous play OFF (play one song at a time)."
+            )
 
     CliMusicTui(client).run()
 
