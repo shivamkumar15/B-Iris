@@ -911,7 +911,11 @@ def playback_stream_url(client: VeromeClient, track: Track) -> tuple[str, dict[s
     try:
         stream_url, metadata = client.stream_url(track.playback_id)
         if yt_dlp_error:
-            metadata = {**metadata, "ytDlpError": yt_dlp_error}
+            clean_error = "\n".join(
+                line for line in yt_dlp_error.splitlines()
+                if not any(marker in line for marker in GOOGLE_SERVICE_MARKERS)
+            ).strip()
+            metadata = {**metadata, "ytDlpError": clean_error}
         return stream_url, metadata, "Verome"
     except CliMusicError as exc:
         detail = f" yt-dlp also failed: {yt_dlp_error}" if yt_dlp_error else ""
@@ -1643,17 +1647,24 @@ def run_tui(client: VeromeClient) -> None:
                     self.set_status(f"Playing {track.title}...")
                 else:
                     log = read_player_log(100)
-                    self.set_status(f"Playback failed. Log: {log}")
+                    if is_bot_check(log):
+                        self.set_status(f"Playback failed. {bot_check_hint()}")
+                    else:
+                        self.set_status(f"Playback failed. Log: {log}")
 
         def handle_player_end(self) -> None:
             if self.player_process and self.player_process.poll() is not None:
                 returncode = self.player_process.poll()
+                log = read_player_log(500)
                 self.stop_player()
                 if returncode != 0:
                     # Player exited with an error (e.g. stream failed to play):
                     # don't auto-advance, otherwise it would rapidly skip through
                     # every track in the list.
-                    self.set_status("Playback stopped (player exited unexpectedly).")
+                    if is_bot_check(log):
+                        self.set_status(f"Playback stopped. {bot_check_hint()}")
+                    else:
+                        self.set_status("Playback stopped (player exited unexpectedly).")
                 elif not self.continuous_play:
                     self.set_status("Playback finished.")
                 elif self.now_playing_index is not None and self.now_playing_index + 1 < len(self.tracks):
