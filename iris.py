@@ -46,6 +46,19 @@ YTDLP_COOKIES_BROWSER_ENV = "IRIS_YTDLP_COOKIES_BROWSER"
 SSL_INSECURE_ENV = "IRIS_SSL_INSECURE"
 PLAYER_LOG = os.path.join(tempfile.gettempdir(), "climusic-player.log")
 PLAYER_IPC_SOCKETS: dict[int, str] = {}
+GOOGLE_SERVICE_MARKERS = (
+    "google_api_key",
+    "google_crash_reporting_api_key",
+    "google_storage_bucket",
+    "project_id",
+)
+BOT_CHECK_MARKERS = (
+    "unusual traffic",
+    "you're not a bot",
+    "confirm you're not a bot",
+    "google_api_key",
+    "recaptcha",
+)
 DATA_HOME = os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share"))
 LIBRARY_FILE = os.path.join(DATA_HOME, "iris", "library.json")
 CONFIG_FILE = os.path.join(DATA_HOME, "iris", "config.json")
@@ -797,7 +810,11 @@ def yt_dlp_stream_url(video_id: str) -> str:
         if stream_urls:
             return stream_urls[-1]
         if result.stderr.strip():
-            last_error = result.stderr.strip().splitlines()[-1]
+            clean_lines = [
+                line for line in result.stderr.splitlines()
+                if not any(marker in line for marker in GOOGLE_SERVICE_MARKERS)
+            ]
+            last_error = clean_lines[-1] if clean_lines else "yt-dlp could not resolve audio"
 
     raise CliMusicError(last_error)
 
@@ -1118,9 +1135,23 @@ def stream_duration(stream_url: str, metadata: dict[str, Any]) -> float | None:
 def read_player_log(max_chars: int = 500) -> str:
     try:
         with open(PLAYER_LOG, encoding="utf-8", errors="replace") as log:
-            return log.read()[-max_chars:].strip()
+            content = log.read()[-max_chars * 4:]
     except OSError:
         return ""
+    lines = [line for line in content.splitlines() if not any(marker in line for marker in GOOGLE_SERVICE_MARKERS)]
+    return "\n".join(lines)[-max_chars:].strip()
+
+
+def is_bot_check(text: str) -> bool:
+    lowered = text.lower()
+    return any(marker in lowered for marker in BOT_CHECK_MARKERS)
+
+
+def bot_check_hint() -> str:
+    return (
+        "YouTube blocked the stream (bot check). Log in to YouTube in your browser, then rerun with "
+        f"{YTDLP_COOKIES_BROWSER_ENV}=firefox or {YTDLP_COOKIES_BROWSER_ENV}=chrome."
+    )
 
 
 def command_search(client: VeromeClient, args: argparse.Namespace) -> None:
