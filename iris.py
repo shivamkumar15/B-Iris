@@ -46,19 +46,7 @@ YTDLP_COOKIES_BROWSER_ENV = "IRIS_YTDLP_COOKIES_BROWSER"
 SSL_INSECURE_ENV = "IRIS_SSL_INSECURE"
 PLAYER_LOG = os.path.join(tempfile.gettempdir(), "climusic-player.log")
 PLAYER_IPC_SOCKETS: dict[int, str] = {}
-GOOGLE_SERVICE_MARKERS = (
-    "google_api_key",
-    "google_crash_reporting_api_key",
-    "google_storage_bucket",
-    "project_id",
-)
-BOT_CHECK_MARKERS = (
-    "unusual traffic",
-    "you're not a bot",
-    "confirm you're not a bot",
-    "google_api_key",
-    "recaptcha",
-)
+
 DATA_HOME = os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share"))
 LIBRARY_FILE = os.path.join(DATA_HOME, "iris", "library.json")
 CONFIG_FILE = os.path.join(DATA_HOME, "iris", "config.json")
@@ -809,15 +797,7 @@ def yt_dlp_stream_url(video_id: str) -> str:
         stream_urls = [line.strip() for line in result.stdout.splitlines() if line.strip().startswith("http")]
         if stream_urls:
             return stream_urls[-1]
-        if result.stderr.strip():
-            clean_lines = [
-                line for line in result.stderr.splitlines()
-                if not any(marker in line for marker in GOOGLE_SERVICE_MARKERS)
-            ]
-            last_error = clean_lines[-1] if clean_lines else "yt-dlp could not resolve audio"
-
-    raise CliMusicError(last_error)
-
+        last_error = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else last_error
 
 def yt_dlp_search(query: str, limit: int = 20) -> list[Track]:
     yt_dlp = find_yt_dlp()
@@ -913,7 +893,6 @@ def playback_stream_url(client: VeromeClient, track: Track) -> tuple[str, dict[s
         if yt_dlp_error:
             clean_error = "\n".join(
                 line for line in yt_dlp_error.splitlines()
-                if not any(marker in line for marker in GOOGLE_SERVICE_MARKERS)
             ).strip()
             metadata = {**metadata, "ytDlpError": clean_error}
         return stream_url, metadata, "Verome"
@@ -1142,21 +1121,7 @@ def read_player_log(max_chars: int = 500) -> str:
             content = log.read()[-max_chars * 4:]
     except OSError:
         return ""
-    lines = [line for line in content.splitlines() if not any(marker in line for marker in GOOGLE_SERVICE_MARKERS)]
     return "\n".join(lines)[-max_chars:].strip()
-
-
-def is_bot_check(text: str) -> bool:
-    lowered = text.lower()
-    return any(marker in lowered for marker in BOT_CHECK_MARKERS)
-
-
-def bot_check_hint() -> str:
-    return (
-        "YouTube blocked the stream (bot check). Log in to YouTube in your browser, then rerun with "
-        f"{YTDLP_COOKIES_BROWSER_ENV}=firefox or {YTDLP_COOKIES_BROWSER_ENV}=chrome."
-    )
-
 
 def command_search(client: VeromeClient, args: argparse.Namespace) -> None:
     tracks = search_tracks(client, args.query, args.filter, args.limit)
