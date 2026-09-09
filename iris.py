@@ -1121,7 +1121,33 @@ def read_player_log(max_chars: int = 500) -> str:
             content = log.read()[-max_chars * 4:]
     except OSError:
         return ""
-    return "\n".join(lines)[-max_chars:].strip()
+    return "\n".join(content.splitlines())[-max_chars:].strip()
+
+
+def is_bot_check(log: str) -> bool:
+    lowered = log.lower()
+    markers = (
+        "sign in to confirm",
+        "not a bot",
+        "confirm you're not a bot",
+        "po token",
+        "cookies-from-browser",
+        "--cookies",
+        "bot check",
+        "http error 403",
+        "http error 429",
+        "status code: 403",
+        "status code: 429",
+    )
+    return any(marker in lowered for marker in markers)
+
+
+def bot_check_hint() -> str:
+    return (
+        "YouTube bot-check detected. Try "
+        f"{YTDLP_COOKIES_BROWSER_ENV}=firefox/chrome or "
+        f"{YTDLP_ARGS_ENV}='--cookies-from-browser chrome'."
+    )
 
 def command_search(client: VeromeClient, args: argparse.Namespace) -> None:
     tracks = search_tracks(client, args.query, args.filter, args.limit)
