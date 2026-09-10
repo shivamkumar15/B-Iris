@@ -556,7 +556,6 @@ class YTMusicClient:
         # ytmusicapi doesn't provide stream URLs
         raise CliMusicError("ytmusicapi does not provide direct streaming URLs")
 
-        # Compatibility methods for existing calls
     def lyrics(self, title: str, artist: str) -> str:
         # We need a video_id for ytmusicapi lyrics, so we search first
         try:
