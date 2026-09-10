@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import ast
 import concurrent.futures
 import json
 import math
@@ -43,7 +44,15 @@ PLAYER_ENV = "IRIS_PLAYER"
 LEGACY_PLAYER_ENV = "CLIMUSIC_PLAYER"
 YTDLP_ARGS_ENV = "IRIS_YTDLP_ARGS"
 YTDLP_COOKIES_BROWSER_ENV = "IRIS_YTDLP_COOKIES_BROWSER"
+YTDLP_COOKIES_ENV = "IRIS_YTDLP_COOKIES"
+YTDLP_PLAYER_CLIENT_ENV = "IRIS_YTDLP_PLAYER_CLIENT"
 SSL_INSECURE_ENV = "IRIS_SSL_INSECURE"
+# Stream URLs (googlevideo) expire after a few hours; refresh cached entries.
+STREAM_CACHE_TTL = 4 * 3600
+# Player clients that most reliably bypass the YouTube "Sign in to confirm
+# you're not a bot" challenge without requiring cookies (2025-2026).
+# See https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies
+YTDLP_FALLBACK_CLIENTS = ("tv,web_safari", "android_vr,web_safari")
 PLAYER_LOG = os.path.join(tempfile.gettempdir(), "climusic-player.log")
 PLAYER_IPC_SOCKETS: dict[int, str] = {}
 
@@ -732,60 +741,269 @@ def find_player() -> list[str]:
 
 @lru_cache(maxsize=1)
 def find_yt_dlp() -> list[str] | None:
-    # First, try to run as a module via the current python executable.
-    # This is the most robust way to avoid shebang/interpreter issues.
+    # Collect every usable yt-dlp and pick the NEWEST. An outdated yt-dlp
+    # silently returns unplayable stream URLs (failed `n`-challenge / missing
+    # JS solver -> instant HTTP 403 in the player), so version matters more
+    # than interpreter convenience.
+    candidates: list[list[str]] = []
     try:
         import yt_dlp
-        return [sys.executable, "-m", "yt_dlp"]
+        candidates.append([sys.executable, "-m", "yt_dlp"])
     except ImportError:
         pass
 
-    # Fallback to binary in PATH
+    # Binary in PATH
     executable = shutil.which("yt-dlp")
     if executable:
-        return [executable]
+        candidates.append([executable])
 
-    # Fallback to binary in venv
+    # Binary next to the current interpreter (venv)
     local_executable = os.path.join(os.path.dirname(sys.executable), "yt-dlp")
     if os.path.exists(local_executable) and os.access(local_executable, os.X_OK):
-        return [local_executable]
+        candidates.append([local_executable])
 
-    return None
+    # Deduplicate (resolve -m vs binary pointing at same install later by version).
+    unique: list[list[str]] = []
+    for candidate in candidates:
+        if candidate not in unique:
+            unique.append(candidate)
+    if not unique:
+        return None
+    if len(unique) == 1:
+        return unique[0]
+    return max(unique, key=_ytdlp_version_key)
+
+
+def _ytdlp_version_key(cmd: list[str]) -> tuple[int, ...]:
+    return _ytdlp_version_tuple(_ytdlp_version(cmd))
+
+
+def _ytdlp_version_tuple(version: str) -> tuple[int, ...]:
+    parts: list[int] = []
+    for piece in version.strip().split("."):
+        digits = "".join(ch for ch in piece if ch.isdigit())
+        if not digits:
+            break
+        parts.append(int(digits))
+    return tuple(parts) if parts else (0,)
+
+
+def _ytdlp_version(cmd: list[str]) -> str:
+    try:
+        result = subprocess.run(
+            [*cmd, "--version"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
+
+
+def _ytdlp_has_opt(args: list[str], *names: str) -> bool:
+    for token in args:
+        for name in names:
+            if token == name or token.startswith(name + "="):
+                return True
+    return False
+
+
+def _ytdlp_user_args() -> list[str]:
+    return shlex.split(os.environ.get(YTDLP_ARGS_ENV, ""))
+
+
+def _ytdlp_remote_components(user_args: list[str]) -> list[str]:
+    """Default EJS solver so yt-dlp can pass YouTube's `n`-challenge.
+
+    Without this, yt-dlp returns links that instantly 403 in the player.
+    Skipped only if the user already sets --remote-components explicitly.
+    """
+    if "remote-components" in " ".join(user_args):
+        return []
+    return ["--remote-components", "ejs:github"]
+
+
+def _ytdlp_explicit_cookies(user_args: list[str]) -> list[str]:
+    """Cookies explicitly configured by the user (browser or file)."""
+    if _ytdlp_has_opt(user_args, "--cookies", "--cookies-from-browser"):
+        return []
+    browser = (os.environ.get(YTDLP_COOKIES_BROWSER_ENV) or "").strip()
+    if browser:
+        return ["--cookies-from-browser", browser]
+    cookie_file = (os.environ.get(YTDLP_COOKIES_ENV) or "").strip()
+    if cookie_file:
+        expanded = os.path.expanduser(cookie_file)
+        if not os.path.exists(expanded):
+            raise CliMusicError(
+                f"Cookies file not found: {expanded} "
+                f"(from {YTDLP_COOKIES_ENV}). Export YouTube cookies to a "
+                "Netscape-format cookies.txt and point the variable at it."
+            )
+        return ["--cookies", expanded]
+    return []
+
+
+def _ytdlp_detect_browsers() -> list[str]:
+    """Browsers likely to hold usable YouTube cookies, best first."""
+    candidates: list[tuple[str, list[str], list[str]]] = [
+        # (yt-dlp name, binaries to check, cookie paths to check)
+        ("firefox", ["firefox"], [
+            os.path.expanduser("~/.config/mozilla/firefox"),
+            os.path.expanduser("~/.mozilla/firefox"),
+        ]),
+        ("chrome", ["google-chrome", "google-chrome-stable", "chrome", "chromium", "chromium-browser"], [
+            os.path.expanduser("~/.config/google-chrome"),
+            os.path.expanduser("~/.config/chromium"),
+        ]),
+        ("chromium", ["chromium", "chromium-browser"], [
+            os.path.expanduser("~/.config/chromium"),
+        ]),
+        ("brave", ["brave", "brave-browser"], [
+            os.path.expanduser("~/.config/BraveSoftware/Brave-Browser"),
+        ]),
+        ("edge", ["microsoft-edge", "microsoft-edge-stable"], [
+            os.path.expanduser("~/.config/microsoft-edge"),
+        ]),
+        ("opera", ["opera"], [os.path.expanduser("~/.config/opera")]),
+        ("vivaldi", ["vivaldi"], [os.path.expanduser("~/.config/vivaldi")]),
+    ]
+    found: list[str] = []
+    for name, binaries, dirs in candidates:
+        has_binary = any(shutil.which(b) for b in binaries)
+        has_profile = any(os.path.isdir(d) for d in dirs)
+        if has_binary or has_profile:
+            found.append(name)
+    # Prefer firefox/chrome which are most commonly logged into YouTube.
+    order = {"firefox": 0, "chrome": 1, "chromium": 2, "brave": 3, "edge": 4}
+    found.sort(key=lambda n: order.get(n, 99))
+    return found[:4]
+
+
+def _ytdlp_client_options(user_args: list[str]) -> list[list[str]]:
+    """Alternate --extractor-args to bypass the bot-check (no cookies needed).
+
+    Returns a list of arg-lists. First entry is [] (yt-dlp defaults) so
+    behaviour is unchanged when the network is not flagged.
+    """
+    joined = " ".join(user_args)
+    if "player_client" in joined:
+        return [[]]
+    override = (os.environ.get(YTDLP_PLAYER_CLIENT_ENV) or "").strip()
+    if override:
+        return [[], ["--extractor-args", f"youtube:player_client={override}"]]
+    options: list[list[str]] = [[]]
+    for client in YTDLP_FALLBACK_CLIENTS:
+        options.append(["--extractor-args", f"youtube:player_client={client}"])
+    return options
+
+
+def _ytdlp_stream_attempts() -> list[list[str]]:
+    """Ordered yt-dlp arg-lists to try for stream resolution.
+
+    Order: bare defaults first (fast path), then alternate player clients
+    (fixes most bot-checks with no setup), then auto-detected browser
+    cookies paired with the best bypass client.
+    """
+    user_args = _ytdlp_user_args()
+    explicit = _ytdlp_explicit_cookies(user_args)
+    base = [*user_args, *_ytdlp_remote_components(user_args), *explicit]
+    if ssl_insecure_enabled() and "--no-check-certificate" not in base:
+        base.append("--no-check-certificate")
+
+    if explicit:
+        # User told us exactly which cookies to use: keep their choice and
+        # only vary the player client.
+        attempts = [[*base, *client] for client in _ytdlp_client_options(user_args)]
+        return attempts
+
+    client_options = _ytdlp_client_options(user_args)
+    attempts = [[*base, *client] for client in client_options]
+    best_bypass = (
+        ["--extractor-args", f"youtube:player_client={YTDLP_FALLBACK_CLIENTS[0]}"]
+        if not (os.environ.get(YTDLP_PLAYER_CLIENT_ENV) or "").strip()
+        and "player_client" not in " ".join(user_args)
+        else []
+    )
+    for browser in _ytdlp_detect_browsers():
+        cookie_args = ["--cookies-from-browser", browser]
+        # Bypass client first (most likely to succeed), then yt-dlp defaults.
+        attempts.append([*base, *cookie_args, *best_bypass] if best_bypass else [*base, *cookie_args])
+        attempts.append([*base, *cookie_args])
+    # Deduplicate while preserving order.
+    seen: set[tuple[str, ...]] = set()
+    unique: list[list[str]] = []
+    for attempt in attempts:
+        key = tuple(attempt)
+        if key not in seen:
+            seen.add(key)
+            unique.append(attempt)
+    return unique[:10]
+
+
+def _ytdlp_short_error(stderr: str, default: str) -> str:
+    lines = [line.strip() for line in stderr.strip().splitlines() if line.strip()]
+    if not lines:
+        return default
+    # Keep the most informative tail; skip generic "ERROR: " prefix noise last.
+    tail = lines[-3:]
+    return " | ".join(tail)[-600:]
+
+
+# yt-dlp runs that print these warnings return stream URLs whose `n`
+# parameter could not be solved. They resolve fine with `-g` but instantly
+# 403 inside the player. Such URLs must be rejected, not played.
+_STALE_YTDLP_MARKERS = (
+    "n challenge solving failed",
+    "challenge solver",
+    "remote components",
+)
+
+
+def _ytdlp_stale_output(stderr: str) -> bool:
+    lowered = stderr.lower()
+    return any(marker in lowered for marker in _STALE_YTDLP_MARKERS)
 
 
 def yt_dlp_stream_url(video_id: str) -> str:
+    return yt_dlp_stream(video_id)[0]
+
+
+def yt_dlp_stream(video_id: str) -> tuple[str, dict[str, str]]:
+    """Resolve best-audio media URL plus playback HTTP headers.
+
+    Uses a single `--print url/--print http_headers` call per attempt so the
+    player (mpv/ffplay) can send the same User-Agent yt-dlp negotiated.
+    """
     yt_dlp = find_yt_dlp()
     if not yt_dlp:
         raise CliMusicError("yt-dlp is not installed")
 
     url = f"https://www.youtube.com/watch?v={video_id}"
-    extra_args = shlex.split(os.environ.get(YTDLP_ARGS_ENV, ""))
-    cookies_browser = os.environ.get(YTDLP_COOKIES_BROWSER_ENV)
-    if cookies_browser and "--cookies-from-browser" not in extra_args and "--cookies" not in extra_args:
-        extra_args.extend(["--cookies-from-browser", cookies_browser])
-
-    attempts = [extra_args]
-    if not any(arg in extra_args for arg in ("--cookies", "--cookies-from-browser")):
-        attempts.extend(
-            [
-                ["--cookies-from-browser", "chrome+kwallet"],
-                ["--cookies-from-browser", "brave+kwallet"],
-                ["--cookies-from-browser", "chrome"],
-                ["--cookies-from-browser", "brave"],
-            ]
-        )
-    if ssl_insecure_enabled():
-        attempts = [[*a, "--no-check-certificate"] for a in attempts]
+    attempts = _ytdlp_stream_attempts()
 
     last_error = "yt-dlp could not resolve audio"
+    first_error = ""
+    bot_error = ""
+    stale_error = ""
     for attempt_args in attempts:
         try:
             result = subprocess.run(
-                [*yt_dlp, *attempt_args, "-f", "bestaudio", "-g", "--no-playlist", url],
+                [
+                    *yt_dlp,
+                    *attempt_args,
+                    "-f", "bestaudio",
+                    "--skip-download",
+                    "--no-playlist",
+                    "--print", "%(url)s",
+                    "--print", "%(http_headers)s",
+                    url,
+                ],
                 check=False,
                 capture_output=True,
                 text=True,
-                timeout=45,
+                timeout=35,
             )
         except subprocess.TimeoutExpired:
             last_error = "yt-dlp timed out while resolving the audio stream"
@@ -795,19 +1013,55 @@ def yt_dlp_stream_url(video_id: str) -> str:
 
         stream_urls = [line.strip() for line in result.stdout.splitlines() if line.strip().startswith("http")]
         if stream_urls:
-            return stream_urls[-1]
-        last_error = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else last_error
+            if _ytdlp_stale_output(result.stderr):
+                # URL looks fine but its `n` param is unsolved -> player 403.
+                stale_error = _ytdlp_short_error(result.stderr, stale_error or last_error)
+                continue
+            return stream_urls[-1], _ytdlp_parse_headers(result.stdout)
+        last_error = _ytdlp_short_error(result.stderr, last_error)
+        if not first_error:
+            first_error = last_error
+        if _ytdlp_stale_output(result.stderr):
+            stale_error = last_error
+        elif is_bot_check(result.stderr):
+            bot_error = last_error
+
+    # All fallbacks (alternate player clients + browser cookies) failed.
+    if stale_error and not bot_error:
+        version = _ytdlp_version(find_yt_dlp() or [])
+        raise CliMusicError(
+            f"yt-dlp failed: {stale_error}. yt-dlp ({version or 'unknown version'}) "
+            f"could not solve YouTube's throttling challenge, so its links 403. "
+            f"Fix: install a JS runtime (node/deno), allow the EJS solver "
+            f"(default {YTDLP_ARGS_ENV} must not disable --remote-components), "
+            f"and update: `python3 -m pip install -U yt-dlp` (plus the IRIS venv)."
+        )
+    # Prefer the bot-check error (most actionable); otherwise report the
+    # first (clean, no-cookies) error rather than cookie-decrypt noise from
+    # later fallback attempts.
+    raise CliMusicError(f"yt-dlp failed: {bot_error or first_error or last_error}. {bot_check_hint()}")
+
+
+def _ytdlp_parse_headers(stdout: str) -> dict[str, str]:
+    for line in stdout.splitlines():
+        text = line.strip()
+        if text.startswith("{") and text.endswith("}"):
+            try:
+                parsed = ast.literal_eval(text)
+            except (SyntaxError, ValueError):
+                continue
+            if isinstance(parsed, dict):
+                return {str(k): str(v) for k, v in parsed.items()}
+    return {}
 
 def yt_dlp_search(query: str, limit: int = 20) -> list[Track]:
     yt_dlp = find_yt_dlp()
     if not yt_dlp:
         raise CliMusicError("yt-dlp is not installed")
 
-    extra_args = shlex.split(os.environ.get(YTDLP_ARGS_ENV, ""))
-    cookies_browser = os.environ.get(YTDLP_COOKIES_BROWSER_ENV)
-    if cookies_browser and "--cookies-from-browser" not in extra_args and "--cookies" not in extra_args:
-        extra_args.extend(["--cookies-from-browser", cookies_browser])
-    if ssl_insecure_enabled():
+    user_args = _ytdlp_user_args()
+    extra_args = [*user_args, *_ytdlp_remote_components(user_args), *_ytdlp_explicit_cookies(user_args)]
+    if ssl_insecure_enabled() and "--no-check-certificate" not in extra_args:
         extra_args.append("--no-check-certificate")
 
     try:
@@ -851,7 +1105,7 @@ def yt_dlp_search(query: str, limit: int = 20) -> list[Track]:
     if tracks:
         return tracks
 
-    error = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "yt-dlp returned no search results"
+    error = _ytdlp_short_error(result.stderr, "yt-dlp returned no search results")
     raise CliMusicError(error)
 
 
@@ -883,7 +1137,11 @@ def playback_stream_url(client: VeromeClient, track: Track) -> tuple[str, dict[s
     yt_dlp_error = ""
     if find_yt_dlp():
         try:
-            return yt_dlp_stream_url(track.playback_id), {}, "yt-dlp"
+            stream_url, headers = yt_dlp_stream(track.playback_id)
+            metadata: dict[str, Any] = {}
+            if headers:
+                metadata["http_headers"] = headers
+            return stream_url, metadata, "yt-dlp"
         except CliMusicError as exc:
             yt_dlp_error = str(exc)
 
@@ -897,10 +1155,7 @@ def playback_stream_url(client: VeromeClient, track: Track) -> tuple[str, dict[s
         return stream_url, metadata, "Verome"
     except CliMusicError as exc:
         detail = f" yt-dlp also failed: {yt_dlp_error}" if yt_dlp_error else ""
-        raise CliMusicError(
-            f"{exc}. YouTube is blocking direct extraction. Try exporting cookies or run with "
-            f"{YTDLP_COOKIES_BROWSER_ENV}=firefox or {YTDLP_ARGS_ENV}='--cookies-from-browser chrome'.{detail}"
-        ) from exc
+        raise CliMusicError(f"{exc}{detail} {bot_check_hint()}") from exc
 
 
 def play_track(client: VeromeClient, track: Track) -> None:
@@ -908,8 +1163,9 @@ def play_track(client: VeromeClient, track: Track) -> None:
     title = metadata.get("title") if isinstance(metadata.get("title"), str) else track.title
     panel("IRIS Player", [f"{title}", f"Artist: {track.artists}", f"Source: {source} / {track.playback_id}"])
     player = find_player()
+    headers = metadata.get("http_headers")
     try:
-        subprocess.run([*player, stream_url], check=False)
+        subprocess.run([*player, *_player_header_args(player, headers), stream_url], check=False)
     except FileNotFoundError as exc:
         raise CliMusicError(f"Player executable not found: {player[0]}") from exc
 
@@ -920,10 +1176,16 @@ def download_track(client: VeromeClient, track: Track, output_dir: str = ".") ->
         raise CliMusicError("yt-dlp is not installed")
 
     url = f"https://www.youtube.com/watch?v={track.playback_id}"
-    extra_args = shlex.split(os.environ.get(YTDLP_ARGS_ENV, ""))
-    cookies_browser = os.environ.get(YTDLP_COOKIES_BROWSER_ENV)
-    if cookies_browser and "--cookies-from-browser" not in extra_args and "--cookies" not in extra_args:
-        extra_args.extend(["--cookies-from-browser", cookies_browser])
+    user_args = _ytdlp_user_args()
+    extra_args = [*user_args, *_ytdlp_remote_components(user_args), *_ytdlp_explicit_cookies(user_args)]
+    # Downloads use the harder-to-block TV client by default unless the user
+    # already chose a player client explicitly.
+    if "player_client" not in " ".join(extra_args):
+        override = (os.environ.get(YTDLP_PLAYER_CLIENT_ENV) or "").strip()
+        client_name = override or YTDLP_FALLBACK_CLIENTS[0]
+        extra_args.extend(["--extractor-args", f"youtube:player_client={client_name}"])
+    if ssl_insecure_enabled() and "--no-check-certificate" not in extra_args:
+        extra_args.append("--no-check-certificate")
 
     clean_artists = re.sub(r'[\\/*?:"<>|]', "", track.artists)
     clean_title = re.sub(r'[\\/*?:"<>|]', "", track.title)
@@ -951,8 +1213,8 @@ def download_track(client: VeromeClient, track: Track, output_dir: str = ".") ->
         raise CliMusicError(f"Could not run yt-dlp: {exc}") from exc
 
     if result.returncode != 0:
-        error_msg = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "Unknown yt-dlp error"
-        raise CliMusicError(f"yt-dlp failed: {error_msg}")
+        error_msg = _ytdlp_short_error(result.stderr, "Unknown yt-dlp error")
+        raise CliMusicError(f"yt-dlp failed: {error_msg}. {bot_check_hint()}")
 
     expected_prefix = f"{clean_artists} - {clean_title}."
     for file in os.listdir(output_dir):
@@ -983,13 +1245,31 @@ def toggle_favorite_saved(track: Track) -> bool:
     return added
 
 
-def start_player(stream_url: str) -> subprocess.Popen[Any]:
+def _player_header_args(player: list[str], headers: Any) -> list[str]:
+    """Extra player args so googlevideo accepts the stream (same UA as yt-dlp)."""
+    if not isinstance(headers, dict):
+        return []
+    user_agent = headers.get("User-Agent") or headers.get("user-agent")
+    if not isinstance(user_agent, str) or not user_agent.strip():
+        return []
+    user_agent = user_agent.strip()
+    name = os.path.basename(player[0]) if player else ""
+    if name == "mpv":
+        return [f"--http-header-fields=User-Agent: {user_agent}"]
+    if name == "ffplay":
+        return ["-headers", f"User-Agent: {user_agent}\r\n"]
+    if name in {"vlc", "cvlc"}:
+        return ["--http-user-agent", user_agent]
+    return []
+
+
+def start_player(stream_url: str, headers: dict[str, str] | None = None) -> subprocess.Popen[Any]:
     player = find_player()
     ipc_socket = ""
-    command = [*player, stream_url]
+    command = [*player, *_player_header_args(player, headers), stream_url]
     if player and os.path.basename(player[0]) == "mpv" and not any(arg.startswith("--input-ipc-server") for arg in player):
         ipc_socket = os.path.join(tempfile.gettempdir(), f"iris-mpv-{os.getpid()}-{time.monotonic_ns()}.sock")
-        command = [*player, f"--input-ipc-server={ipc_socket}", stream_url]
+        command = [*player, f"--input-ipc-server={ipc_socket}", *_player_header_args(player, headers), stream_url]
     with open(PLAYER_LOG, "w", encoding="utf-8") as log:
         log.write(f"Running: {' '.join(command[:-1])} <stream-url>\n")
     try:
@@ -1129,7 +1409,9 @@ def is_bot_check(log: str) -> bool:
         "sign in to confirm",
         "not a bot",
         "confirm you're not a bot",
+        "confirm you are not a bot",
         "po token",
+        "getpot",
         "cookies-from-browser",
         "--cookies",
         "bot check",
@@ -1137,15 +1419,27 @@ def is_bot_check(log: str) -> bool:
         "http error 429",
         "status code: 403",
         "status code: 429",
+        "403: forbidden",
+        "403 forbidden",
+        "failed to resolve po token",
+        "n challenge",
+        "challenge solver",
+        "remote components",
+        "unable to download webpage",
     )
     return any(marker in lowered for marker in markers)
 
 
 def bot_check_hint() -> str:
     return (
-        "YouTube bot-check detected. Try "
-        f"{YTDLP_COOKIES_BROWSER_ENV}=firefox/chrome or "
-        f"{YTDLP_ARGS_ENV}='--cookies-from-browser chrome'."
+        "YouTube bot-check detected. IRIS already retried alternate players "
+        "and any available browser cookies. Next steps: 1) update yt-dlp "
+        "(`python3 -m pip install -U yt-dlp`), 2) log into YouTube in "
+        "firefox/chrome, close the browser, then run with "
+        f"{YTDLP_COOKIES_BROWSER_ENV}=firefox (or chrome), 3) or export a "
+        f"cookies.txt and set {YTDLP_COOKIES_ENV}=~/cookies.txt, 4) or force "
+        f"a client with {YTDLP_PLAYER_CLIENT_ENV}='mweb' (options: "
+        "tv,web_safari / android_vr,web_safari / mweb)."
     )
 
 def command_search(client: VeromeClient, args: argparse.Namespace) -> None:
@@ -1493,6 +1787,7 @@ def run_tui(client: VeromeClient) -> None:
             self.favorite_tracks = library["favorites"]
             self._favorite_ids: set[str] = {track_key(t) for t in self.favorite_tracks}
             self.stream_cache: dict[str, tuple[str, dict[str, Any], str]] = {}
+            self.stream_cache_at: dict[str, float] = {}
             self.search_cache: dict[tuple[str, str], list[Track]] = {}
             self.prefetching: set[str] = set()
             self.current_view = "Search"
@@ -1638,6 +1933,8 @@ def run_tui(client: VeromeClient) -> None:
                 else:
                     log = read_player_log(100)
                     if is_bot_check(log):
+                        # Drop the (likely 403) URL so the next Play retries fresh.
+                        self.drop_cached_stream(track)
                         self.set_status(f"Playback failed. {bot_check_hint()}")
                     else:
                         self.set_status(f"Playback failed. Log: {log}")
@@ -1652,6 +1949,7 @@ def run_tui(client: VeromeClient) -> None:
                     # don't auto-advance, otherwise it would rapidly skip through
                     # every track in the list.
                     if is_bot_check(log):
+                        self.drop_cached_stream(self.now_playing)
                         self.set_status(f"Playback stopped. {bot_check_hint()}")
                     else:
                         self.set_status("Playback stopped (player exited unexpectedly).")
@@ -1747,9 +2045,20 @@ def run_tui(client: VeromeClient) -> None:
             return track_key(track) in self._favorite_ids
 
         def cached_playback_stream_url(self, track: Track) -> tuple[str, dict[str, Any], str]:
-            if track.playback_id not in self.stream_cache:
-                self.stream_cache[track.playback_id] = playback_stream_url(self.client, track)
+            cached_at = self.stream_cache_at.get(track.playback_id, 0.0)
+            if track.playback_id in self.stream_cache and (time.monotonic() - cached_at) < STREAM_CACHE_TTL:
+                return self.stream_cache[track.playback_id]
+            # Expired (googlevideo URLs expire) or missing: resolve fresh.
+            self.stream_cache.pop(track.playback_id, None)
+            self.stream_cache[track.playback_id] = playback_stream_url(self.client, track)
+            self.stream_cache_at[track.playback_id] = time.monotonic()
             return self.stream_cache[track.playback_id]
+
+        def drop_cached_stream(self, track: Track | None) -> None:
+            if track is None:
+                return
+            self.stream_cache.pop(track.playback_id, None)
+            self.stream_cache_at.pop(track.playback_id, None)
 
         def save_library_state(self) -> None:
             if self._save_timer is not None:
@@ -2081,13 +2390,17 @@ def run_tui(client: VeromeClient) -> None:
             self.now_playing = track
             self.now_playing_index = index
             self.refresh_details()
-            cached = track.playback_id in self.stream_cache
+            cached_at = self.stream_cache_at.get(track.playback_id, 0.0)
+            cached = track.playback_id in self.stream_cache and (time.monotonic() - cached_at) < STREAM_CACHE_TTL
             self.busy_label = "Starting playback" if cached else "Resolving audio stream"
             self.set_status(f"Fetching stream for {track.title}...")
             try:
                 stream_url, metadata, source = await asyncio.to_thread(self.cached_playback_stream_url, track)
                 self.stop_player()
-                self.player_process = start_player(stream_url)
+                headers = metadata.get("http_headers")
+                self.player_process = start_player(
+                    stream_url, headers if isinstance(headers, dict) else None
+                )
                 self.is_paused = False
                 self.playback_started_at = time.monotonic()
                 self.playback_paused_at = None
